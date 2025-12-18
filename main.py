@@ -7,197 +7,129 @@ import pymongo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
-import html # HTML escape karne ke liye zaroori hai
+import html
 
-# --- 1. CONFIGURATION (ENV VARIABLES) ---
+# --- 1. CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
 
-# --- 2. DATABASE CONNECTION (MONGODB) ---
+# --- 2. DATABASE ---
 try:
     client = pymongo.MongoClient(MONGO_URL)
     db = client["NameStylerBot"]
     users_collection = db["users"]
-    print("✅ Connected to MongoDB successfully!")
+    print("✅ MongoDB Connected!")
 except Exception as e:
-    print(f"❌ MongoDB Connection Failed: {e}")
+    print(f"❌ DB Error: {e}")
 
-# --- 3. FLASK SERVER (FOR 24/7 UPTIME) ---
+# --- 3. FLASK (UPTIME) ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "Bot is running! 🚀"
+def home(): return "Alive"
+def run(): app.run(host='0.0.0.0', port=8080)
+def keep_alive(): t = Thread(target=run); t.start()
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# --- 4. GEMINI AI SETUP (FIXED) ---
+# --- 4. AI SETUP ---
 genai.configure(api_key=GEMINI_API_KEY)
-
-# NOTE: Humne 'generation_config' hata diya hai kyunki wo crash kar raha tha.
-# Hum 'gemini-1.5-flash' use kar rahe hain jo sabse STABLE hai.
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- 5. HELPER FUNCTIONS ---
-
-def add_user(user_id, first_name):
-    try:
-        if not users_collection.find_one({"_id": user_id}):
-            users_collection.insert_one({
-                "_id": user_id, 
-                "first_name": first_name,
-                "total_generations": 0
-            })
-    except Exception as e:
-        print(f"DB Error: {e}")
-
-def update_current_name(user_id, name_text):
-    try:
-        users_collection.update_one(
-            {"_id": user_id}, 
-            {"$set": {"current_name": name_text}}, 
-            upsert=True
-        )
-    except Exception as e:
-        print(f"DB Error: {e}")
+# --- 5. FUNCTIONS ---
+def update_current_name(user_id, name):
+    users_collection.update_one({"_id": user_id}, {"$set": {"current_name": name}}, upsert=True)
 
 def get_user_current_name(user_id):
-    try:
-        user = users_collection.find_one({"_id": user_id})
-        return user.get("current_name") if user else None
-    except Exception:
-        return None
+    u = users_collection.find_one({"_id": user_id})
+    return u.get("current_name") if u else None
 
-async def generate_aesthetic_name(name: str, previous_style: str = None) -> str:
-    """Generates name with Debugging enabled"""
-    
-    avoid_instruction = ""
+async def generate_aesthetic_name(name, previous_style=None):
+    avoid_msg = ""
     if previous_style:
-        avoid_instruction = f"IMPORTANT: The user rejected this style: '{previous_style}'. Do NOT make it similar. Create something COMPLETELY different."
-
-    prompt = (
-        f"You are an expert modern aesthetic font designer for Gen-Z. "
-        f"Transform the name '{name}' into a highly aesthetic, trendy, and stylish version. "
-        f"Use unique unicode symbols, kaomoji, and decorative borders. "
-        f"Style Examples (Vibe): ᯓ𓂃❛ 𝐒 𝛖 𝐝 ֟፝ᥱ 𝛆 𝛒 </𝟑 𝁘ໍ𝀛𓂃🍷 or 𓆩🖤𓆪 or ✦ ִ ֶ ָ 𓆝 𓆟 𓆞 "
-        f"Strict Rules: \n"
-        f"1. No old/clunky symbols.\n"
-        f"2. Return ONLY the styled text.\n"
-        f"3. {avoid_instruction}"
-    )
+        avoid_msg = f"NOTE: User saw this style '{previous_style}', make it TOTALLY different now."
     
+    prompt = (
+        f"Design a highly aesthetic, trendy name for: '{name}'. "
+        f"Use unique symbols, kaomoji, borders (e.g. ᯓ, 𓂃, 𓆩, 𓆪). "
+        f"Return ONLY the styled text. No intro/outro. "
+        f"{avoid_msg}"
+    )
     try:
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        print(f"❌ GEMINI ERROR: {e}")
-        return f"⚠️ SYSTEM ERROR: {str(e)}"
+        return "⚠️ Server Busy. Try Again."
 
-# --- 6. BOT HANDLERS ---
-
+# --- 6. HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    add_user(user.id, user.first_name)
-    
-    # HTML Formatting for aesthetic look
-    # <code> tag = Text ko box me dikhayega (Highlight)
-    # <blockquote> tag = Text ke aage vertical line layega
-    
-    safe_name = html.escape(user.first_name)
-    
-    welcome_text = (
-        f"👋 Hello <code>|• {safe_name} ༄!</code>\n\n"
-        f"<blockquote>Send me your name (e.g., Sudeep), and I will transform it into a Modern Aesthetic Style! ✨</blockquote>\n\n"
-        f"<i>I use AI to create unique designs every time. Try me!</i>"
+    name = html.escape(update.effective_user.first_name)
+    txt = (
+        f"👋 Hello <code>|• {name} ༄!</code>\n\n"
+        f"<blockquote>Send me your name, and I will create a Modern Aesthetic Style for you! ✨</blockquote>"
     )
-    
-    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        count = users_collection.count_documents({})
-        await update.message.reply_text(f"📊 **Total Users:** {count}", parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        await update.message.reply_text(f"DB Error: {e}")
+    await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.message.text
-    
     update_current_name(user_id, user_name)
-    
-    await update.message.reply_text("✨ *Designing your name...*", parse_mode=ParseMode.MARKDOWN)
-    
-    styled_name = await generate_aesthetic_name(user_name)
-    
-    if "SYSTEM ERROR" in styled_name:
-        await update.message.reply_text(f"❌ {styled_name}")
-        return
 
-    keyboard = [
-        [InlineKeyboardButton("Next Style 🔄", callback_data="next"),
-         InlineKeyboardButton("Copy Name 📋", callback_data="copy")]
-    ]
+    # STEP 1: Pehle "Designing..." bhejo
+    msg = await update.message.reply_text("✨ <b>Designing your name...</b>", parse_mode=ParseMode.HTML)
     
-    await update.message.reply_text(
-        f"`{styled_name}`", 
+    # STEP 2: AI se style banwao
+    style = await generate_aesthetic_name(user_name)
+
+    # STEP 3: Usi message ko EDIT karo (Naya message nahi bhejega -> Clean Chat)
+    buttons = [[InlineKeyboardButton("Next Style 🔄", callback_data="next"),
+                InlineKeyboardButton("Copy Name 📋", callback_data="copy")]]
+    
+    await msg.edit_text(
+        f"`{style}`", 
         parse_mode=ParseMode.MARKDOWN_V2, 
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer() 
     
     if query.data == "next":
+        # Button dabate hi "Loading..." dikhao taaki user ko lage bot kaam kar raha hai
+        await query.answer("Generating new style...") 
+        await query.edit_message_text("🔄 <i>Creating new vibe...</i>", parse_mode=ParseMode.HTML)
+        
         original_name = get_user_current_name(user_id)
-        
         if not original_name:
-            await query.edit_message_text("❌ Session expired. Please send the name again.")
+            await query.edit_message_text("❌ Session expired. Send name again.")
             return
 
-        current_style = query.message.text 
-        new_style = await generate_aesthetic_name(original_name, previous_style=current_style)
+        # Naya style banao
+        new_style = await generate_aesthetic_name(original_name)
         
-        if "SYSTEM ERROR" in new_style:
-            await query.edit_message_text(f"❌ {new_style}")
-            return
-
-        keyboard = [[InlineKeyboardButton("Next Style 🔄", callback_data="next"),
-                     InlineKeyboardButton("Copy Name 📋", callback_data="copy")]]
+        buttons = [[InlineKeyboardButton("Next Style 🔄", callback_data="next"),
+                    InlineKeyboardButton("Copy Name 📋", callback_data="copy")]]
         
-        try:
-            await query.edit_message_text(
-                f"`{new_style}`", 
-                parse_mode=ParseMode.MARKDOWN_V2, 
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception:
-            pass 
+        # Result show karo
+        await query.edit_message_text(
+            f"`{new_style}`", 
+            parse_mode=ParseMode.MARKDOWN_V2, 
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
     elif query.data == "copy":
-        await query.answer("👆 Tap on the name above to copy it!", show_alert=True)
+        # Copy Button ka sach: Telegram button se copy allow nahi karta via API
+        # Isliye hum user ko sikha rahe hain ki text par tap kare
+        await query.answer("⚠️ Button se copy nahi hota!\n👆 Upar Text par Tap karo, wo copy ho jayega.", show_alert=True)
 
-# --- 7. MAIN EXECUTION ---
+# --- 7. RUN ---
 def main():
     keep_alive()
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(button_click))
-
-    print("🤖 Bot is running...")
-    application.run_polling()
+    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app_bot.add_handler(CallbackQueryHandler(button_click))
+    app_bot.run_polling()
 
 if __name__ == "__main__":
     main()
-
+    
