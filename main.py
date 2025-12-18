@@ -75,6 +75,7 @@ async def generate_aesthetic_name(name, previous_style=None):
         f"2. Return ONLY the styled text.\n"
         f"3. {avoid_instruction}"
      )
+
     if previous_style:
         prompt += f" Don't give this style again: {previous_style}"
 
