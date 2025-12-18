@@ -1,344 +1,203 @@
 import os
 import logging
-import asyncio
-import traceback
 from threading import Thread
 from flask import Flask
 import google.generativeai as genai
 import pymongo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters,
-    CallbackQueryHandler, ContextTypes, ConversationHandler
-)
-import html
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+import html # HTML escape karne ke liye zaroori hai
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION (ENV VARIABLES) ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MONGO_URL = os.getenv("MONGO_URL")
-OWNER_ID = os.getenv("OWNER_ID")
 
-# States
-ADDING_KEY, BROADCASTING = range(2)
-
-# --- 2. DATABASE CONNECTION ---
+# --- 2. DATABASE CONNECTION (MONGODB) ---
 try:
     client = pymongo.MongoClient(MONGO_URL)
     db = client["NameStylerBot"]
     users_collection = db["users"]
-    keys_collection = db["api_keys"]
-    print("✅ MongoDB Connected!")
+    print("✅ Connected to MongoDB successfully!")
 except Exception as e:
-    print(f"❌ DB Error: {e}")
+    print(f"❌ MongoDB Connection Failed: {e}")
 
-# --- 3. FLASK SERVER ---
+# --- 3. FLASK SERVER (FOR 24/7 UPTIME) ---
 app = Flask('')
+
 @app.route('/')
-def home(): return "Bot is Alive!"
-def run(): app.run(host='0.0.0.0', port=8080)
-def keep_alive(): t = Thread(target=run); t.start()
+def home():
+    return "Bot is running! 🚀"
 
-# --- 4. SIMPLE SINGLE KEY LOGIC ---
-def get_active_key():
-    """Sirf ek hi key layega jo DB mein hai"""
-    doc = keys_collection.find_one({})
-    return doc['key'] if doc else None
+def run():
+    app.run(host='0.0.0.0', port=8080)
 
-def set_new_key(api_key):
-    """Purani key uda kar nayi set karega (Auto-Switch)"""
-    keys_collection.delete_many({}) # Purani saari delete
-    keys_collection.insert_one({"key": api_key}) # Nayi add
-    return True
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
-def delete_current_key():
-    keys_collection.delete_many({})
-    return True
+# --- 4. GEMINI AI SETUP (FIXED) ---
+genai.configure(api_key=GEMINI_API_KEY)
 
-# --- 5. AI GENERATION (WITH OWNER ALERT) ---
-async def generate_content(prompt_text, bot_instance):
-    api_key = get_active_key()
-    
-    if not api_key:
-        return "❌ Error: No API Key set. Waiting for Owner."
+# NOTE: Humne 'generation_config' hata diya hai kyunki wo crash kar raha tha.
+# Hum 'gemini-1.5-flash' use kar rahe hain jo sabse STABLE hai.
+model = genai.GenerativeModel('gemini-1.5-flash')
 
+# --- 5. HELPER FUNCTIONS ---
+
+def add_user(user_id, first_name):
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        response = await asyncio.wait_for(
-            model.generate_content_async(prompt_text), timeout=10.0
-        )
-        return response.text.strip()
-
+        if not users_collection.find_one({"_id": user_id}):
+            users_collection.insert_one({
+                "_id": user_id, 
+                "first_name": first_name,
+                "total_generations": 0
+            })
     except Exception as e:
-        error_msg = str(e).lower()
-        
-        # --- OWNER NOTIFICATION LOGIC ---
-        # Agar Quota khatam hua ya Rate Limit aayi
-        if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
-            print("⚠️ Limit Reached! Notifying Owner...")
-            try:
-                await bot_instance.send_message(
-                    chat_id=OWNER_ID,
-                    text=(
-                        "🚨 **URGENT ALERT: API KEY EXPIRED** 🚨\n\n"
-                        "Google API ki limit khatam ho gayi hai.\n"
-                        "Users ko error aa raha hai.\n\n"
-                        "👉 **Turant /start dabakar nayi Key Add karein.**"
-                    ),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except Exception as notify_error:
-                print(f"Failed to notify owner: {notify_error}")
-            
-            return "❌ Server Busy (Limit Reached). Owner notified."
-        
-        # Other Errors
-        print(f"⚠️ API Error: {e}")
-        return "❌ Error: Server Issue. Try again."
+        print(f"DB Error: {e}")
 
-# --- Helper: Loading Bar ---
-async def show_loading_bar(message, text="Generating"):
-    frames = [
-        f"<b>{text}...</b>\n▰▰▱▱▱▱▱▱▱▱ 20%",
-        f"<b>{text}...</b>\n▰▰▰▰▰▰▱▱▱▱ 60%",
-        f"<b>{text}...</b>\n▰▰▰▰▰▰▰▰▰▱ 90%"
-    ]
+def update_current_name(user_id, name_text):
     try:
-        for frame in frames:
-            await message.edit_text(frame, parse_mode=ParseMode.HTML)
-            await asyncio.sleep(0.3) 
-    except BadRequest: pass 
+        users_collection.update_one(
+            {"_id": user_id}, 
+            {"$set": {"current_name": name_text}}, 
+            upsert=True
+        )
+    except Exception as e:
+        print(f"DB Error: {e}")
 
-# --- 6. HANDLERS ---
+def get_user_current_name(user_id):
+    try:
+        user = users_collection.find_one({"_id": user_id})
+        return user.get("current_name") if user else None
+    except Exception:
+        return None
+
+async def generate_aesthetic_name(name: str, previous_style: str = None) -> str:
+    """Generates name with Debugging enabled"""
+    
+    avoid_instruction = ""
+    if previous_style:
+        avoid_instruction = f"IMPORTANT: The user rejected this style: '{previous_style}'. Do NOT make it similar. Create something COMPLETELY different."
+
+    prompt = (
+        f"You are an expert modern aesthetic font designer for Gen-Z. "
+        f"Transform the name '{name}' into a highly aesthetic, trendy, and stylish version. "
+        f"Use unique unicode symbols, kaomoji, and decorative borders. "
+        f"Style Examples (Vibe): ᯓ𓂃❛ 𝐒 𝛖 𝐝 ֟፝ᥱ 𝛆 𝛒 </𝟑 𝁘ໍ𝀛𓂃🍷 or 𓆩🖤𓆪 or ✦ ִ ֶ ָ 𓆝 𓆟 𓆞 "
+        f"Strict Rules: \n"
+        f"1. No old/clunky symbols.\n"
+        f"2. Return ONLY the styled text.\n"
+        f"3. {avoid_instruction}"
+    )
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"❌ GEMINI ERROR: {e}")
+        return f"⚠️ SYSTEM ERROR: {str(e)}"
+
+# --- 6. BOT HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    add_user(user.id, user.first_name)
     
-    # Save User
-    users_collection.update_one(
-        {"_id": user.id},
-        {"$set": {"first_name": user.first_name, "username": user.username}},
-        upsert=True
+    # HTML Formatting for aesthetic look
+    # <code> tag = Text ko box me dikhayega (Highlight)
+    # <blockquote> tag = Text ke aage vertical line layega
+    
+    safe_name = html.escape(user.first_name)
+    
+    welcome_text = (
+        f"👋 Hello <code>|• {safe_name} ༄!</code>\n\n"
+        f"<blockquote>Send me your name (e.g., Sudeep), and I will transform it into a Modern Aesthetic Style! ✨</blockquote>\n\n"
+        f"<i>I use AI to create unique designs every time. Try me!</i>"
     )
-
-    # --- ADMIN PANEL (SIMPLIFIED) ---
-    if str(user.id) == OWNER_ID:
-        current_key = get_active_key()
-        status = "🟢 Active" if current_key else "🔴 Missing"
-        masked_key = f"...{current_key[-5:]}" if current_key else "None"
-        
-        user_count = users_collection.count_documents({})
-        
-        welcome_text = (
-            f"👑 **Admin Control (Single Key)**\n\n"
-            f"🔑 **Current Key:** `{masked_key}`\n"
-            f"📊 **Status:** {status}\n"
-            f"👥 **Users:** `{user_count}`\n\n"
-            f"👇 **Actions:**"
-        )
-        
-        kb = [
-            [InlineKeyboardButton("🔄 Replace/Set Key", callback_data="admin_add")],
-            [InlineKeyboardButton("🗑️ Delete Key", callback_data="admin_remove")],
-            [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")]
-        ]
-        await update.message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    # --- NORMAL USER ---
-    txt = (
-        f"👋 Hello {html.escape(user.first_name)}!\n\n"
-        f"🔹 **Send any name** to generate stylish fonts.\n"
-        f"🔹 Use `/bio <text>` to generate bio.\n"
-    )
-    await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
-
-async def bio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = " ".join(context.args)
-    if not user_text:
-        await update.message.reply_text("⚠️ Usage: `/bio I love coding`")
-        return
-
-    msg = await update.message.reply_text("📝 <b>Writing...</b>", parse_mode=ParseMode.HTML)
-    prompt = f"Write a short aesthetic bio for: '{user_text}'. Keep it under 3 lines. No intro."
     
-    # Bot instance pass kar rahe hain notification ke liye
-    result = await generate_content(prompt, context.bot)
-    
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await msg.edit_text(f"<code>{html.escape(result)}</code>", parse_mode=ParseMode.HTML)
-    except:
-        await msg.edit_text(result)
+        count = users_collection.count_documents({})
+        await update.message.reply_text(f"📊 **Total Users:** {count}", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"DB Error: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.message.text
     user_id = update.effective_user.id
+    user_name = update.message.text
     
-    users_collection.update_one(
-        {"_id": user_id},
-        {"$set": {"current_name": user_name, "current_style": "random"}},
-        upsert=True
-    )
+    update_current_name(user_id, user_name)
+    
+    await update.message.reply_text("✨ *Designing your name...*", parse_mode=ParseMode.MARKDOWN)
+    
+    styled_name = await generate_aesthetic_name(user_name)
+    
+    if "SYSTEM ERROR" in styled_name:
+        await update.message.reply_text(f"❌ {styled_name}")
+        return
 
     keyboard = [
-        [InlineKeyboardButton("🖤 Dark", callback_data="style_dark"),
-         InlineKeyboardButton("🌸 Cute", callback_data="style_cute")],
-        [InlineKeyboardButton("👾 Glitch", callback_data="style_glitch"),
-         InlineKeyboardButton("🏳️ Minimal", callback_data="style_minimal")],
-        [InlineKeyboardButton("🎲 Random", callback_data="style_random")]
+        [InlineKeyboardButton("Next Style 🔄", callback_data="next"),
+         InlineKeyboardButton("Copy Name 📋", callback_data="copy")]
     ]
     
     await update.message.reply_text(
-        f"🎨 <b>Choose Vibe for:</b> <code>{html.escape(user_name)}</code>", 
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.HTML
+        f"`{styled_name}`", 
+        parse_mode=ParseMode.MARKDOWN_V2, 
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def user_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data
     user_id = query.from_user.id
+    await query.answer() 
     
-    if data.startswith("admin_"): return 
-
-    user_data = users_collection.find_one({"_id": user_id})
-    if not user_data or "current_name" not in user_data:
-        await query.answer("❌ Session Expired", show_alert=True)
-        return
-
-    original_name = user_data["current_name"]
-    
-    style_map = {
-        "style_dark": "Dark, Gothic, 🖤 symbols",
-        "style_cute": "Cute, Kaomoji, 🌸 symbols",
-        "style_glitch": "Glitch, Zalgo, 👾 symbols",
-        "style_minimal": "Clean, Minimalist, 🏳️ symbols",
-        "style_random": "Trendy aesthetic mixed style"
-    }
-
-    # Style persistence
-    if data == "next":
-        selected_style_key = user_data.get("current_style", "style_random")
-        status_text = "⚡ <b>Regenerating...</b>"
-    elif data == "back_menu":
-        # Show menu again
-        keyboard = [
-            [InlineKeyboardButton("🖤 Dark", callback_data="style_dark"),
-             InlineKeyboardButton("🌸 Cute", callback_data="style_cute")],
-            [InlineKeyboardButton("👾 Glitch", callback_data="style_glitch"),
-             InlineKeyboardButton("🏳️ Minimal", callback_data="style_minimal")],
-            [InlineKeyboardButton("🎲 Random", callback_data="style_random")]
-        ]
-        await query.edit_message_text(f"🎨 <b>Choose Vibe:</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-        return
-    else:
-        users_collection.update_one({"_id": user_id}, {"$set": {"current_style": data}})
-        selected_style_key = data
-        status_text = f"⏳ <b>Applying Vibe...</b>"
-
-    style_prompt = style_map.get(selected_style_key, style_map["style_random"])
-
-    await query.answer("Working...")
-    try:
-        await query.edit_message_text(status_text, parse_mode=ParseMode.HTML)
-    except BadRequest: pass
-
-    final_prompt = (
-        f"Transform '{original_name}' into a {style_prompt} username. "
-        f"Strictly ONE output. No explanation."
-    )
-    
-    # Bot instance passed here
-    result = await generate_content(final_prompt, context.bot)
-
-    buttons = [
-        [InlineKeyboardButton("🔄 Next Version", callback_data="next")],
-        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_menu")]
-    ]
-    
-    try:
-        final_text = f"<code>{html.escape(result)}</code>"
-        await query.edit_message_text(final_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
-    except Exception:
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"<code>{html.escape(result)}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-
-# --- ADMIN ACTIONS ---
-
-async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    
-    if data == "admin_add":
-        await query.message.reply_text("📤 **Send the NEW API Key.**\n(Old key will be deleted automatically)")
-        return ADDING_KEY
+    if query.data == "next":
+        original_name = get_user_current_name(user_id)
         
-    elif data == "admin_remove":
-        delete_current_key()
-        await query.message.reply_text("🗑️ **Key Deleted.** Bot is now offline.")
-        # Refresh Panel
-        await start(update, context) 
+        if not original_name:
+            await query.edit_message_text("❌ Session expired. Please send the name again.")
+            return
 
-    elif data == "admin_broadcast":
-        await query.message.reply_text("📢 **Send Message to Broadcast.**")
-        return BROADCASTING
+        current_style = query.message.text 
+        new_style = await generate_aesthetic_name(original_name, previous_style=current_style)
+        
+        if "SYSTEM ERROR" in new_style:
+            await query.edit_message_text(f"❌ {new_style}")
+            return
 
-async def save_key_handler(update, context):
-    new_key = update.message.text.strip()
-    set_new_key(new_key) # Old key deleted, new added
-    await update.message.reply_text(f"✅ **New Key Set!**\nEnding in: `...{new_key[-5:]}`", parse_mode=ParseMode.MARKDOWN)
-    await start(update, context)
-    return ConversationHandler.END
-
-async def broadcast_handler(update, context):
-    msg = update.message.text
-    status_msg = await update.message.reply_text("📢 **Sending...**")
-    users = users_collection.find({})
-    count = 0
-    for user in users:
+        keyboard = [[InlineKeyboardButton("Next Style 🔄", callback_data="next"),
+                     InlineKeyboardButton("Copy Name 📋", callback_data="copy")]]
+        
         try:
-            await context.bot.send_message(chat_id=user["_id"], text=msg)
-            count += 1
-            await asyncio.sleep(0.05)
-        except: pass
-    await status_msg.edit_text(f"✅ Sent to {count} users.")
-    return ConversationHandler.END
+            await query.edit_message_text(
+                f"`{new_style}`", 
+                parse_mode=ParseMode.MARKDOWN_V2, 
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception:
+            pass 
 
-async def cancel(update, context):
-    await update.message.reply_text("❌ Cancelled.")
-    await start(update, context)
-    return ConversationHandler.END
+    elif query.data == "copy":
+        await query.answer("👆 Tap on the name above to copy it!", show_alert=True)
 
-# --- MAIN ---
+# --- 7. MAIN EXECUTION ---
 def main():
     keep_alive()
-    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_button_click, pattern="^admin_")],
-        states={
-            ADDING_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_key_handler)],
-            BROADCASTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_handler)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-    
-    app_bot.add_handler(CommandHandler("bio", bio_command))
-    app_bot.add_handler(conv_handler)
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app_bot.add_handler(CallbackQueryHandler(user_button_click, pattern="^(style_|next|back_menu)"))
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    print("✅ Bot (Single Key Mode) Running...")
-    app_bot.run_polling()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button_click))
+
+    print("🤖 Bot is running...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
-                            
+    
