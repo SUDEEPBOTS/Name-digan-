@@ -65,7 +65,8 @@ async def generate_aesthetic_name(name, previous_style=None):
     if not api_keys:
         return "❌ Error: No API Keys. Owner add keys /start"
 
-     prompt = (
+    # ✅ FIXED: Indentation sahi ki hai (4 spaces)
+    prompt = (
         f"You are an expert modern aesthetic font designer for Gen-Z. "
         f"Transform the name '{name}' into a highly aesthetic, trendy, and stylish version. "
         f"Use unique unicode symbols, kaomoji, and decorative borders. "
@@ -73,11 +74,10 @@ async def generate_aesthetic_name(name, previous_style=None):
         f"Strict Rules: \n"
         f"1. No old/clunky symbols.\n"
         f"2. Return ONLY the styled text.\n"
-        f"3. {avoid_instruction}"
-     )
+    )
 
     if previous_style:
-        prompt += f" Don't give this style again: {previous_style}"
+        prompt += f" Note: Do NOT generate this style again: {previous_style}"
 
     for _ in range(len(api_keys)):
         current_key_index = (current_key_index + 1) % len(api_keys)
@@ -85,7 +85,7 @@ async def generate_aesthetic_name(name, previous_style=None):
         
         try:
             genai.configure(api_key=key_to_use)
-            model = genai.GenerativeModel('gemini-2.5-flash')
+            model = genai.GenerativeModel('gemini-1.5-flash')
             response = await asyncio.wait_for(
                 model.generate_content_async(prompt), timeout=8.0
             )
@@ -95,6 +95,7 @@ async def generate_aesthetic_name(name, previous_style=None):
             continue
 
     return "❌ Server Busy. Try later."
+    
 
 # --- Helper: Loading Bar Animation ---
 async def show_loading_bar(message):
