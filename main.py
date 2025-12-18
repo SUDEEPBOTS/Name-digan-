@@ -7,6 +7,7 @@ import pymongo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+import html # HTML escape karne ke liye zaroori hai
 
 # --- 1. CONFIGURATION (ENV VARIABLES) ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -36,17 +37,12 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- 4. GEMINI AI SETUP ---
+# --- 4. GEMINI AI SETUP (FIXED) ---
 genai.configure(api_key=GEMINI_API_KEY)
 
-generation_config = {
-    "temperature": 1.1,
-    "top_p": 0.95,
-    "max_output_tokens": 150,
-}
-
-# IMPORTANT: Pehle 1.5 par test karo. Agar ye chal gaya to baad me 2.5 kar lena.
-model = genai.GenerativeModel('gemini-2.5-flash', generation_config=generation_config)
+# NOTE: Humne 'generation_config' hata diya hai kyunki wo crash kar raha tha.
+# Hum 'gemini-1.5-flash' use kar rahe hain jo sabse STABLE hai.
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 5. HELPER FUNCTIONS ---
 
@@ -100,8 +96,6 @@ async def generate_aesthetic_name(name: str, previous_style: str = None) -> str:
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        # --- DEBUGGING LINE ---
-        # Ye asli error print karega console me aur Telegram par bhi bhejega
         print(f"❌ GEMINI ERROR: {e}")
         return f"⚠️ SYSTEM ERROR: {str(e)}"
 
@@ -111,11 +105,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user.id, user.first_name)
     
-    msg = (
-        f"👋 **Hello {user.first_name}!**\n\n"
-        "Send me your name (e.g., Sudeep), and I will transform it into a **Modern Aesthetic Style**! ✨"
+    # HTML Formatting for aesthetic look
+    # <code> tag = Text ko box me dikhayega (Highlight)
+    # <blockquote> tag = Text ke aage vertical line layega
+    
+    safe_name = html.escape(user.first_name)
+    
+    welcome_text = (
+        f"👋 Hello <code>|• {safe_name} ༄!</code>\n\n"
+        f"<blockquote>Send me your name (e.g., Sudeep), and I will transform it into a Modern Aesthetic Style! ✨</blockquote>\n\n"
+        f"<i>I use AI to create unique designs every time. Try me!</i>"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -134,7 +136,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     styled_name = await generate_aesthetic_name(user_name)
     
-    # Agar error aaya to buttons mat dikhao, sirf error dikhao
     if "SYSTEM ERROR" in styled_name:
         await update.message.reply_text(f"❌ {styled_name}")
         return
@@ -199,4 +200,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+
