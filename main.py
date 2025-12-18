@@ -85,7 +85,7 @@ async def generate_aesthetic_name(name, previous_style=None):
         
         try:
             genai.configure(api_key=key_to_use)
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.5-flash')
             response = await asyncio.wait_for(
                 model.generate_content_async(prompt), timeout=8.0
             )
