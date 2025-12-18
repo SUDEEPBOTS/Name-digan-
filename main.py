@@ -42,7 +42,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # NOTE: Humne 'generation_config' hata diya hai kyunki wo crash kar raha tha.
 # Hum 'gemini-1.5-flash' use kar rahe hain jo sabse STABLE hai.
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 5. HELPER FUNCTIONS ---
 
