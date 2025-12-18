@@ -81,7 +81,7 @@ async def generate_aesthetic_name(name, app_instance, previous_style=None):
         key_to_use = api_keys[current_key_index]
         
         genai.configure(api_key=key_to_use)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
 
         try:
             response = await asyncio.wait_for(
