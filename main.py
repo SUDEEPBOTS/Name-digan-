@@ -1,6 +1,7 @@
 import os
 import logging
-import asyncio 
+import asyncio
+import traceback  # Error detail dekhne ke liye add kiya
 from threading import Thread
 from flask import Flask
 import google.generativeai as genai
@@ -8,7 +9,7 @@ import pymongo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, 
+    Application, CommandHandler, MessageHandler, filters,
     CallbackQueryHandler, ContextTypes, ConversationHandler
 )
 import html
@@ -16,9 +17,9 @@ import html
 # --- 1. CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
-OWNER_ID = os.getenv("OWNER_ID") # Apna Telegram ID daalna zaroori hai!
+OWNER_ID = os.getenv("OWNER_ID") 
 
-# States for Conversation (Add/Remove Key)
+# States for Conversation
 ADDING_KEY, REMOVING_KEY = range(2)
 
 # --- 2. DATABASE CONNECTION ---
@@ -26,7 +27,7 @@ try:
     client = pymongo.MongoClient(MONGO_URL)
     db = client["NameStylerBot"]
     users_collection = db["users"]
-    keys_collection = db["api_keys"] # Naya folder API Keys ke liye
+    keys_collection = db["api_keys"]
     print("✅ MongoDB Connected!")
 except Exception as e:
     print(f"❌ DB Error: {e}")
@@ -40,7 +41,6 @@ def keep_alive(): t = Thread(target=run); t.start()
 
 # --- 4. KEY MANAGEMENT LOGIC ---
 def get_all_keys():
-    """DB se saari keys list lata hai"""
     docs = keys_collection.find({})
     return [doc['key'] for doc in docs]
 
@@ -57,14 +57,13 @@ def remove_api_key(api_key):
 # --- 5. AI GENERATION LOGIC (ROTATION) ---
 current_key_index = 0
 
-async def generate_aesthetic_name(name, app_instance, previous_style=None):
+async def generate_aesthetic_name(name, previous_style=None):
     global current_key_index
     
-    # DB se Taaza Keys lo
     api_keys = get_all_keys()
     
     if not api_keys:
-        return "❌ No API Keys Found! Owner please add keys."
+        return "❌ Error: No API Keys Found in DB."
 
     prompt = (
         f"Design a highly aesthetic, trendy name for: '{name}'. "
@@ -76,14 +75,14 @@ async def generate_aesthetic_name(name, app_instance, previous_style=None):
 
     # Rotation Logic
     for _ in range(len(api_keys)):
-        # Key select karo
         current_key_index = (current_key_index + 1) % len(api_keys)
         key_to_use = api_keys[current_key_index]
         
-        genai.configure(api_key=key_to_use)
-        model = genai.GenerativeModel('gemini-2.5-flash')
-
         try:
+            # Configure specifically for this request
+            genai.configure(api_key=key_to_use)
+            model = genai.GenerativeModel('gemini-2.5-flash') # Model update kiya (fast version)
+
             response = await asyncio.wait_for(
                 model.generate_content_async(prompt), timeout=10.0
             )
@@ -91,14 +90,16 @@ async def generate_aesthetic_name(name, app_instance, previous_style=None):
 
         except Exception as e:
             error_msg = str(e)
-            # Agar Rate Limit ya Quota ka issue hai to next key try karega
+            print(f"⚠️ Key Error ({key_to_use[-5:]}): {error_msg}") # Console log for debugging
+            
             if "429" in error_msg or "400" in error_msg or "exhausted" in error_msg:
-                print(f"⚠️ Key ending in ...{key_to_use[-5:]} Exhausted. Switching...")
-                continue # Loop next key par jayega
+                continue 
             else:
+                # Agar koi aur error hai toh traceback print karo
+                traceback.print_exc()
                 return f"❌ Error: {error_msg}"
 
-    return "❌ All Keys Exhausted. Owner needs to add more."
+    return "❌ All Keys Exhausted."
 
 # --- 6. HANDLERS ---
 
@@ -106,40 +107,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
     
-    # --- ADMIN PANEL (SIRF OWNER KE LIYE) ---
     if user_id == OWNER_ID:
         total_keys = keys_collection.count_documents({})
-        
         welcome_text = (
             f"👑 **Welcome Boss!**\n\n"
-            f"🤖 **Bot Status:** Active\n"
-            f"🔑 **Total API Keys:** `{total_keys}`\n\n"
-            f"Select an action below:"
+            f"🔑 **Total Keys:** `{total_keys}`\n"
+            f"Select action:"
         )
-        
         keyboard = [
-            [InlineKeyboardButton("➕ Add API Key", callback_data="admin_add"),
+            [InlineKeyboardButton("➕ Add Key", callback_data="admin_add"),
              InlineKeyboardButton("🗑️ Remove Key", callback_data="admin_remove")],
-            [InlineKeyboardButton("👁️ View All Keys", callback_data="admin_view")]
+            [InlineKeyboardButton("👁️ View Keys", callback_data="admin_view")]
         ]
         await update.message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # --- NORMAL USER WELCOME ---
-    try:
-        if not users_collection.find_one({"_id": user.id}):
-            users_collection.insert_one({"_id": user.id, "first_name": user.first_name})
-    except: pass
+    # User ko DB mein save karo
+    users_collection.update_one(
+        {"_id": user.id}, 
+        {"$set": {"first_name": user.first_name}}, 
+        upsert=True
+    )
 
     name = html.escape(user.first_name)
-    txt = (
-        f"👋 Hello <code>|• {name} ༄!</code>\n\n"
-        f"<blockquote>Send me your name, and I will create a Modern Aesthetic Style! ✨</blockquote>"
-    )
+    txt = f"👋 Hello <b>{name}</b>!\nSend me a name to style it."
     await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
 
 # --- ADMIN FUNCTIONS ---
-
 async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -148,106 +142,112 @@ async def admin_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == "admin_view":
         keys = get_all_keys()
         if not keys:
-            await query.edit_message_text("📂 **No Keys Found.** Add some first!")
+            await query.edit_message_text("📂 **No Keys Found.**")
             return
-        
-        msg = "🔑 **Active API Keys:**\n\n"
+        msg = "🔑 **Active Keys:**\n\n"
         for i, key in enumerate(keys):
-            # Key ko hide karke dikhayenge security ke liye (Last 4 digits only)
-            masked_key = f"xxxx...{key[-5:]}"
-            msg += f"{i+1}. `{masked_key}`\n"
-        
-        # Wapas Main Menu jane ka button
-        kb = [[InlineKeyboardButton("🔙 Back to Panel", callback_data="admin_back")]]
+            msg += f"{i+1}. `...{key[-5:]}`\n"
+        kb = [[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]
         await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == "admin_add":
-        await query.message.reply_text("📤 **Send me the new Gemini API Key now.**\nType /cancel to stop.")
+        await query.message.reply_text("📤 Send new Gemini API Key.")
         return ADDING_KEY
 
     elif data == "admin_remove":
-        await query.message.reply_text("🗑️ **Send me the API Key you want to delete.**\nType /cancel to stop.")
+        await query.message.reply_text("🗑️ Send API Key to delete.")
         return REMOVING_KEY
 
     elif data == "admin_back":
-        # Wapas Start wala panel dikhao
-        total_keys = keys_collection.count_documents({})
-        welcome_text = (
-            f"👑 **Admin Panel**\n"
-            f"🔑 **Total API Keys:** `{total_keys}`"
-        )
-        keyboard = [
-            [InlineKeyboardButton("➕ Add API Key", callback_data="admin_add"),
-             InlineKeyboardButton("🗑️ Remove Key", callback_data="admin_remove")],
-            [InlineKeyboardButton("👁️ View All Keys", callback_data="admin_view")]
-        ]
-        await query.edit_message_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        await start(update, context) # Wapas start function call karo
 
 async def save_new_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key_text = update.message.text.strip()
-    
     if add_new_key(key_text):
-        await update.message.reply_text(f"✅ **Success:** Key ending in `...{key_text[-5:]}` added!")
+        await update.message.reply_text(f"✅ Added: `...{key_text[-5:]}`", parse_mode=ParseMode.MARKDOWN)
     else:
-        await update.message.reply_text("⚠️ This key already exists in database.")
-    
+        await update.message.reply_text("⚠️ Exists already.")
     return ConversationHandler.END
 
 async def delete_old_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key_text = update.message.text.strip()
-    
     if remove_api_key(key_text):
-        await update.message.reply_text(f"🗑️ **Deleted:** Key ending in `...{key_text[-5:]}` removed.")
+        await update.message.reply_text("🗑️ Deleted.")
     else:
-        await update.message.reply_text("❌ Key not found in database.")
-    
+        await update.message.reply_text("❌ Not found.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Operation Cancelled.")
+    await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
-# --- USER FUNCTIONS (SAME AS BEFORE) ---
+# --- USER FUNCTIONS ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.text
-    msg = await update.message.reply_text("⚡ <b>Connecting to AI...</b>", parse_mode=ParseMode.HTML)
-    await asyncio.sleep(0.5)
-    await msg.edit_text("🎨 <b>Designing your masterpiece...</b>", parse_mode=ParseMode.HTML)
+    user_id = update.effective_user.id
 
-    style = await generate_aesthetic_name(user_name, context.application)
+    # 1. IMPORTANT: Name ko DB mein save karo taaki 'Next' button kaam kare
+    users_collection.update_one(
+        {"_id": user_id},
+        {"$set": {"current_name": user_name}},
+        upsert=True
+    )
 
-    if "Error" in style or "Timeout" in style:
-        await msg.edit_text(f"⚠️ {style}")
+    msg = await update.message.reply_text("🎨 <b>Designing...</b>", parse_mode=ParseMode.HTML)
+    
+    # 2. Generate Style
+    style = await generate_aesthetic_name(user_name)
+
+    if style.startswith("❌"):
+        await msg.edit_text(style)
         return
 
     buttons = [[InlineKeyboardButton("Next Style 🔄", callback_data="next")]]
-    await msg.edit_text(f"`{style}`", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(buttons))
+    
+    # 3. Safe sending (MarkdownV2 kabhi kabhi crash karta hai agar symbols galat ho)
+    try:
+        await msg.edit_text(f"`{style}`", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(buttons))
+    except Exception as e:
+        # Agar Markdown error aaye toh normal text bhej do
+        await msg.edit_text(f"{style}", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def user_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    
+    # Check karo ye admin button toh nahi hai
+    if query.data.startswith("admin_"):
+        return # Ise ConversationHandler handle karega
+
     if query.data == "next":
         try:
-            await query.edit_message_text("▰▱▱▱▱▱▱▱▱▱ 10%")
-            await asyncio.sleep(0.2)
-            await query.edit_message_text("▰▰▰▰▰▰▰▰▱▱ 80%")
+            await query.answer("Generating...")
         except: pass
 
-        original_name = db.users.find_one({"_id": query.from_user.id}).get("current_name")
+        # DB se purana naam nikalo
+        user_data = users_collection.find_one({"_id": query.from_user.id})
+        original_name = user_data.get("current_name") if user_data else None
+
         if not original_name:
-            await query.edit_message_text("❌ Expired.")
+            await query.edit_message_text("❌ Session Expired. Send name again.")
             return
 
-        new_style = await generate_aesthetic_name(original_name, context.application)
+        # Naya style generate karo (purana style avoid karke)
+        current_text = query.message.text
+        new_style = await generate_aesthetic_name(original_name, previous_style=current_text)
+        
         buttons = [[InlineKeyboardButton("Next Style 🔄", callback_data="next")]]
-        await query.edit_message_text(f"`{new_style}`", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(buttons))
-
+        
+        try:
+            await query.edit_message_text(f"`{new_style}`", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(buttons))
+        except:
+            await query.edit_message_text(f"{new_style}", reply_markup=InlineKeyboardMarkup(buttons))
 
 # --- 7. RUN ---
 def main():
     keep_alive()
     app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Conversation Handler for Adding/Removing Keys
+    # Admin Conversation
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_button_click, pattern="^admin_")],
         states={
@@ -260,8 +260,9 @@ def main():
     app_bot.add_handler(conv_handler)
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app_bot.add_handler(CallbackQueryHandler(user_button_click, pattern="^next")) # Sirf user wale buttons
+    app_bot.add_handler(CallbackQueryHandler(user_button_click, pattern="^next"))
 
+    print("Bot Started...")
     app_bot.run_polling()
 
 if __name__ == "__main__":
