@@ -46,7 +46,7 @@ generation_config = {
 }
 
 # IMPORTANT: Pehle 1.5 par test karo. Agar ye chal gaya to baad me 2.5 kar lena.
-model = genai.GenerativeModel('gemini-1.5-flash', generation_config=generation_config)
+model = genai.GenerativeModel('gemini-2.5-flash', generation_config=generation_config)
 
 # --- 5. HELPER FUNCTIONS ---
 
