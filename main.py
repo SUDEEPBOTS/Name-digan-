@@ -48,7 +48,7 @@ generation_config = {
 }
 
 # Note: Agar 2.5 Flash available ho to 'gemini-2.5-flash' likh dena
-model = genai.GenerativeModel('gemini-1.5-flash', generation_config=generation_config)
+model = genai.GenerativeModel('gemini-2.5-flash', generation_config=generation_config)
 
 # --- 5. HELPER FUNCTIONS ---
 
