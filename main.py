@@ -34,7 +34,7 @@ def keep_alive(): t = Thread(target=run); t.start()
 # --- 4. AI SETUP ---
 genai.configure(api_key=GEMINI_API_KEY)
 # Note: 1.5 Flash hi use karein, 2.5 abhi 500 Error de raha hai.
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- 5. FUNCTIONS ---
 def update_current_name(user_id, name):
