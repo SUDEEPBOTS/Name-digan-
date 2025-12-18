@@ -7,7 +7,7 @@ import pymongo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
-import html # HTML escape karne ke liye zaroori hai
+import html 
 
 # --- 1. CONFIGURATION (ENV VARIABLES) ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -37,12 +37,9 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# --- 4. GEMINI AI SETUP (FIXED) ---
+# --- 4. GEMINI AI SETUP ---
 genai.configure(api_key=GEMINI_API_KEY)
-
-# NOTE: Humne 'generation_config' hata diya hai kyunki wo crash kar raha tha.
-# Hum 'gemini-1.5-flash' use kar rahe hain jo sabse STABLE hai.
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- 5. HELPER FUNCTIONS ---
 
@@ -105,16 +102,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user.id, user.first_name)
     
-    # HTML Formatting for aesthetic look
-    # <code> tag = Text ko box me dikhayega (Highlight)
-    # <blockquote> tag = Text ke aage vertical line layega
-    
     safe_name = html.escape(user.first_name)
     
     welcome_text = (
         f"👋 Hello <code>|• {safe_name} ༄!</code>\n\n"
-        f"<blockquote>Send me your name (e.g., Sudeep), and I will transform it into a Modern Aesthetic Style! ✨</blockquote>\n\n"
-        f"<i>I use AI to create unique designs every time. Try me!</i>"
+        f"<blockquote>Send me your name, and I will transform it into a Modern Aesthetic Style! ✨</blockquote>\n\n"
+        f"<i>I use AI to create unique designs. Just send a text!</i>"
     )
     
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
@@ -132,20 +125,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     update_current_name(user_id, user_name)
     
-    await update.message.reply_text("✨ *Designing your name...*", parse_mode=ParseMode.MARKDOWN)
+    # 1. Pehle Loading Bar bhejo (Wait msg)
+    loading_text = "<b>⚡ Generating Style...</b>\n[▰▰▰▰▱▱▱▱▱▱] 40%"
+    msg = await update.message.reply_text(loading_text, parse_mode=ParseMode.HTML)
     
+    # 2. AI se name generate karo
     styled_name = await generate_aesthetic_name(user_name)
     
     if "SYSTEM ERROR" in styled_name:
-        await update.message.reply_text(f"❌ {styled_name}")
+        await msg.edit_text(f"❌ {styled_name}")
         return
 
+    # 3. Copy button hata diya, sirf Next Style rakha
     keyboard = [
-        [InlineKeyboardButton("Next Style 🔄", callback_data="next"),
-         InlineKeyboardButton("Copy Name 📋", callback_data="copy")]
+        [InlineKeyboardButton("Next Style 🔄", callback_data="next")]
     ]
     
-    await update.message.reply_text(
+    # 4. Usi purane message ko EDIT karke result dikhao (Clean DM)
+    # ParseMode.MARKDOWN_V2 use kiya taki tap-to-copy (monospace) work kare
+    await msg.edit_text(
         f"`{styled_name}`", 
         parse_mode=ParseMode.MARKDOWN_V2, 
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -154,14 +152,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer() 
+    # await query.answer() # Optional: remove spinner immediately
     
     if query.data == "next":
         original_name = get_user_current_name(user_id)
         
         if not original_name:
-            await query.edit_message_text("❌ Session expired. Please send the name again.")
+            await query.answer("❌ Session expired. Send name again.", show_alert=True)
             return
+
+        # 1. Button click par message ko wapis Loading state me edit karo
+        try:
+            await query.edit_message_text(
+                "<b>🎨 Designing New Vibe...</b>\n[▰▰▰▰▰▰▰▰▱▱] 80%", 
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass # Sometimes edit fails if triggered too fast
 
         current_style = query.message.text 
         new_style = await generate_aesthetic_name(original_name, previous_style=current_style)
@@ -170,9 +177,10 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ {new_style}")
             return
 
-        keyboard = [[InlineKeyboardButton("Next Style 🔄", callback_data="next"),
-                     InlineKeyboardButton("Copy Name 📋", callback_data="copy")]]
+        # Sirf Next Button
+        keyboard = [[InlineKeyboardButton("Next Style 🔄", callback_data="next")]]
         
+        # 2. Result aate hi wapis edit karke final output dikhao
         try:
             await query.edit_message_text(
                 f"`{new_style}`", 
@@ -181,9 +189,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass 
-
-    elif query.data == "copy":
-        await query.answer("👆 Tap on the name above to copy it!", show_alert=True)
 
 # --- 7. MAIN EXECUTION ---
 def main():
